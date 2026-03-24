@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <iostream>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 
 #include <mavsdk/plugins/telemetry/telemetry.h>
@@ -21,7 +23,6 @@ struct MavsdkPlatformDriver::Internals {
 
 MavsdkPlatformDriver::MavsdkPlatformDriver(const MavsdkConfig& config)
     : config_(config) {
-  // Connect to autopilot at construction time so dispatcher is available
   Mavsdk::Configuration mavsdk_config{ComponentType::GroundStation};
   mavsdk_ = std::make_unique<Mavsdk>(mavsdk_config);
 
@@ -55,39 +56,58 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context) {
   telemetry_thread_ = std::thread([this, &context] {
     Telemetry telemetry(system_);
 
+    std::mutex buf_mutex;
+    std::optional<arch_nav::vehicle::GlobalPosition> buf_gp;
+    std::optional<arch_nav::vehicle::Kinematics> buf_kin;
+    std::optional<arch_nav::vehicle::VehicleStatus> buf_status;
+
     telemetry.subscribe_position(
-        [&context](Telemetry::Position pos) {
-          arch_nav::vehicle::GlobalPosition gp(
+        [&buf_mutex, &buf_gp](Telemetry::Position pos) {
+          std::lock_guard<std::mutex> lock(buf_mutex);
+          buf_gp.emplace(
               pos.latitude_deg, pos.longitude_deg,
               static_cast<double>(pos.absolute_altitude_m));
-          context.update(gp);
         });
 
     telemetry.subscribe_velocity_ned(
-        [&context, &telemetry](Telemetry::VelocityNed vel) {
+        [&buf_mutex, &buf_kin, &telemetry](Telemetry::VelocityNed vel) {
           auto pos = telemetry.position();
           auto heading = telemetry.heading();
-          arch_nav::vehicle::Kinematics kin(
+          std::lock_guard<std::mutex> lock(buf_mutex);
+          buf_kin.emplace(
               0.0, 0.0, 0.0,
               vel.north_m_s, vel.east_m_s, vel.down_m_s,
               0.0, 0.0, 0.0,
               pos.latitude_deg, pos.longitude_deg,
               static_cast<double>(pos.absolute_altitude_m),
               heading.heading_deg);
-          context.update(kin);
         });
 
     telemetry.subscribe_armed(
-        [&context](bool armed) {
-          arch_nav::vehicle::VehicleStatus status(
+        [&buf_mutex, &buf_status](bool armed) {
+          std::lock_guard<std::mutex> lock(buf_mutex);
+          buf_status.emplace(
               arch_nav::constants::ControlState::KERNEL_CONTROLLED,
               armed ? arch_nav::constants::ArmState::ARMED
                     : arch_nav::constants::ArmState::DISARMED);
-          context.update(status);
         });
 
     while (running_) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+      std::optional<arch_nav::vehicle::GlobalPosition> gp;
+      std::optional<arch_nav::vehicle::Kinematics> kin;
+      std::optional<arch_nav::vehicle::VehicleStatus> status;
+      {
+        std::lock_guard<std::mutex> lock(buf_mutex);
+        gp.swap(buf_gp);
+        kin.swap(buf_kin);
+        status.swap(buf_status);
+      }
+
+      if (gp) context.update(*gp);
+      if (kin) context.update(*kin);
+      if (status) context.update(*status);
     }
 
     telemetry.subscribe_position(nullptr);

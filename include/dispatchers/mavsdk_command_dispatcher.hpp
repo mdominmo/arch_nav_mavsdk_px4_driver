@@ -28,16 +28,21 @@ class MavsdkCommandDispatcher : public arch_nav::dispatchers::ICommandDispatcher
 
   ~MavsdkCommandDispatcher() override;
 
-  void execute_takeoff(double height, std::function<void()> on_complete) override;
-  void execute_land(std::function<void()> on_complete) override;
-  void execute_waypoint_following(
-      std::vector<arch_nav::vehicle::GeoWaypoint> waypoints,
+  arch_nav::constants::CommandResponse execute_takeoff(
+      double height, arch_nav::constants::ReferenceFrame frame,
       std::function<void()> on_complete) override;
-  void execute_trajectory(
+  arch_nav::constants::CommandResponse execute_land(
+      std::function<void()> on_complete) override;
+  arch_nav::constants::CommandResponse execute_waypoint_following(
+      std::vector<arch_nav::vehicle::Waypoint> waypoints,
+      arch_nav::constants::ReferenceFrame frame,
+      std::function<void()> on_complete) override;
+  arch_nav::constants::CommandResponse execute_trajectory(
       std::vector<arch_nav::vehicle::TrajectoryPoint> trajectory,
+      arch_nav::constants::ReferenceFrame frame,
       std::function<void()> on_complete) override;
-  void execute_arm() override;
-  void execute_disarm() override;
+  arch_nav::constants::CommandResponse execute_arm() override;
+  arch_nav::constants::CommandResponse execute_disarm() override;
   void stop() override;
 
  private:

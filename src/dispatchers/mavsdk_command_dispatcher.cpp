@@ -4,6 +4,8 @@
 #include <iostream>
 
 using namespace mavsdk;
+using arch_nav::constants::CommandResponse;
+using arch_nav::constants::ReferenceFrame;
 
 namespace arch_nav_mavsdk {
 
@@ -39,34 +41,39 @@ void MavsdkCommandDispatcher::clear_subscriptions() {
   }
 }
 
-void MavsdkCommandDispatcher::execute_arm() {
+CommandResponse MavsdkCommandDispatcher::execute_arm() {
   auto result = action_->arm();
   if (result != Action::Result::Success) {
     std::cerr << "[MAVSDK] Arm failed: " << result << std::endl;
+    return CommandResponse::DENIED;
   }
+  return CommandResponse::ACCEPTED;
 }
 
-void MavsdkCommandDispatcher::execute_disarm() {
+CommandResponse MavsdkCommandDispatcher::execute_disarm() {
   auto result = action_->disarm();
   if (result != Action::Result::Success) {
     std::cerr << "[MAVSDK] Disarm failed: " << result << std::endl;
+    return CommandResponse::DENIED;
   }
+  return CommandResponse::ACCEPTED;
 }
 
-void MavsdkCommandDispatcher::execute_takeoff(double height,
-                                               std::function<void()> on_complete) {
+CommandResponse MavsdkCommandDispatcher::execute_takeoff(
+    double height, ReferenceFrame /*frame*/,
+    std::function<void()> on_complete) {
   stop();
 
   auto set_alt_result = action_->set_takeoff_altitude(static_cast<float>(height));
   if (set_alt_result != Action::Result::Success) {
     std::cerr << "[MAVSDK] Set takeoff altitude failed: " << set_alt_result << std::endl;
-    return;
+    return CommandResponse::DENIED;
   }
 
   auto takeoff_result = action_->takeoff();
   if (takeoff_result != Action::Result::Success) {
     std::cerr << "[MAVSDK] Takeoff failed: " << takeoff_result << std::endl;
-    return;
+    return CommandResponse::DENIED;
   }
 
   std::cout << "[MAVSDK] Takeoff initiated at " << height << "m" << std::endl;
@@ -78,34 +85,46 @@ void MavsdkCommandDispatcher::execute_takeoff(double height,
   stop_requested_ = false;
 
   monitor_thread_ = std::thread([this] {
+    auto saw_takeoff = std::make_shared<std::atomic<bool>>(false);
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+
     flight_mode_handle_ = telemetry_->subscribe_flight_mode(
-        [this](Telemetry::FlightMode mode) {
-          if (mode == Telemetry::FlightMode::Hold) {
-            std::cout << "[MAVSDK] Takeoff complete (HOLD reached)" << std::endl;
-            std::lock_guard<std::mutex> lock(complete_mutex_);
-            if (on_complete_) {
-              on_complete_();
-              on_complete_ = nullptr;
-            }
+        [saw_takeoff, completed](Telemetry::FlightMode mode) {
+          if (mode == Telemetry::FlightMode::Takeoff) {
+            saw_takeoff->store(true);
+            return;
+          }
+          if (saw_takeoff->load() && mode == Telemetry::FlightMode::Hold) {
+            completed->store(true);
           }
         });
 
     while (!stop_requested_) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      std::lock_guard<std::mutex> lock(complete_mutex_);
-      if (!on_complete_) break;
+      if (completed->load()) {
+        std::cout << "[MAVSDK] Takeoff complete" << std::endl;
+        std::lock_guard<std::mutex> lock(complete_mutex_);
+        if (on_complete_) {
+          on_complete_();
+          on_complete_ = nullptr;
+        }
+        break;
+      }
     }
     clear_subscriptions();
   });
+
+  return CommandResponse::ACCEPTED;
 }
 
-void MavsdkCommandDispatcher::execute_land(std::function<void()> on_complete) {
+CommandResponse MavsdkCommandDispatcher::execute_land(
+    std::function<void()> on_complete) {
   stop();
 
   auto result = action_->land();
   if (result != Action::Result::Success) {
     std::cerr << "[MAVSDK] Land failed: " << result << std::endl;
-    return;
+    return CommandResponse::DENIED;
   }
 
   std::cout << "[MAVSDK] Landing initiated" << std::endl;
@@ -119,14 +138,22 @@ void MavsdkCommandDispatcher::execute_land(std::function<void()> on_complete) {
   monitor_thread_ = std::thread([this] {
     wait_for_landed_and_notify();
   });
+
+  return CommandResponse::ACCEPTED;
 }
 
-void MavsdkCommandDispatcher::execute_waypoint_following(
-    std::vector<arch_nav::vehicle::GeoWaypoint> waypoints,
+CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
+    std::vector<arch_nav::vehicle::Waypoint> waypoints,
+    ReferenceFrame frame,
     std::function<void()> on_complete) {
+  if (frame != ReferenceFrame::GLOBAL_WGS84) {
+    std::cerr << "[MAVSDK] Waypoint following only supports GLOBAL_WGS84 frame" << std::endl;
+    return CommandResponse::DENIED;
+  }
+
   stop();
 
-  // Build mission plan from GeoWaypoints
+  // Build mission plan from Waypoints (using lat/lon/alt union members)
   Mission::MissionPlan plan;
   for (const auto& wp : waypoints) {
     Mission::MissionItem item{};
@@ -147,7 +174,7 @@ void MavsdkCommandDispatcher::execute_waypoint_following(
   auto upload_result = mission_->upload_mission(plan);
   if (upload_result != Mission::Result::Success) {
     std::cerr << "[MAVSDK] Mission upload failed: " << upload_result << std::endl;
-    return;
+    return CommandResponse::DENIED;
   }
   std::cout << "[MAVSDK] Mission uploaded (" << waypoints.size()
             << " waypoints)" << std::endl;
@@ -159,7 +186,7 @@ void MavsdkCommandDispatcher::execute_waypoint_following(
   auto start_result = mission_->start_mission();
   if (start_result != Mission::Result::Success) {
     std::cerr << "[MAVSDK] Mission start failed: " << start_result << std::endl;
-    return;
+    return CommandResponse::DENIED;
   }
   std::cout << "[MAVSDK] Mission started" << std::endl;
 
@@ -192,14 +219,18 @@ void MavsdkCommandDispatcher::execute_waypoint_following(
       }
     }
   });
+
+  return CommandResponse::ACCEPTED;
 }
 
-void MavsdkCommandDispatcher::execute_trajectory(
+CommandResponse MavsdkCommandDispatcher::execute_trajectory(
     std::vector<arch_nav::vehicle::TrajectoryPoint> /*trajectory*/,
+    ReferenceFrame /*frame*/,
     std::function<void()> on_complete) {
   std::cerr << "[MAVSDK] execute_trajectory not yet implemented "
             << "(requires Offboard plugin)" << std::endl;
   if (on_complete) on_complete();
+  return CommandResponse::NOT_SUPPORTED;
 }
 
 void MavsdkCommandDispatcher::stop() {
