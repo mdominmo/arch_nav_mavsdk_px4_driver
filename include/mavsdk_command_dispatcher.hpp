@@ -15,8 +15,8 @@
 #include <mavsdk/plugins/param/param.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
-#include "dispatchers/i_command_dispatcher.hpp"
-#include "config/mavsdk_config.hpp"
+#include "arch_nav/driver/i_command_dispatcher.hpp"
+#include "mavsdk_config.hpp"
 
 namespace arch_nav_mavsdk {
 
@@ -30,13 +30,15 @@ class MavsdkCommandDispatcher : public arch_nav::dispatchers::ICommandDispatcher
 
   arch_nav::constants::CommandResponse execute_takeoff(
       double height, arch_nav::constants::ReferenceFrame frame,
-      std::function<void()> on_complete) override;
+      std::function<void()> on_complete,
+      arch_nav::report::TakeoffDriverOperationData& driver_data) override;
   arch_nav::constants::CommandResponse execute_land(
       std::function<void()> on_complete) override;
   arch_nav::constants::CommandResponse execute_waypoint_following(
       std::vector<arch_nav::vehicle::Waypoint> waypoints,
       arch_nav::constants::ReferenceFrame frame,
-      std::function<void()> on_complete) override;
+      std::function<void()> on_complete,
+      arch_nav::report::WaypointDriverOperationData& driver_data) override;
   arch_nav::constants::CommandResponse execute_trajectory(
       std::vector<arch_nav::vehicle::TrajectoryPoint> trajectory,
       arch_nav::constants::ReferenceFrame frame,

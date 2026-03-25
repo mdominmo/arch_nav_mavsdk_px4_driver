@@ -1,4 +1,4 @@
-#include "platform/driver_registry.hpp"
+#include "arch_nav/driver/driver_registry.hpp"
 #include "mavsdk_config_loader.hpp"
 #include "mavsdk_platform_driver.hpp"
 

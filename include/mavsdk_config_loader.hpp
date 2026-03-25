@@ -3,7 +3,7 @@
 
 #include <string>
 
-#include "config/mavsdk_config.hpp"
+#include "mavsdk_config.hpp"
 
 namespace arch_nav_mavsdk {
 

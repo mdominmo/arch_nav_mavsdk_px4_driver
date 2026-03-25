@@ -14,7 +14,7 @@ find_package(MAVSDK REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
-  src/dispatchers/mavsdk_command_dispatcher.cpp
+  src/mavsdk_command_dispatcher.cpp
   src/mavsdk_platform_driver.cpp
   src/mavsdk_config_loader.cpp
   src/mavsdk_registration.cpp

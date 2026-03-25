@@ -7,8 +7,8 @@
 
 #include <mavsdk/mavsdk.h>
 
-#include "platform/i_platform_driver.hpp"
-#include "config/mavsdk_config.hpp"
+#include "arch_nav/driver/i_platform_driver.hpp"
+#include "mavsdk_config.hpp"
 
 namespace arch_nav_mavsdk {
 

@@ -1,14 +1,15 @@
 #include "mavsdk_platform_driver.hpp"
 
 #include <chrono>
-#include <iostream>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
-#include "dispatchers/mavsdk_command_dispatcher.hpp"
+#include "arch_nav/context/vehicle_context.hpp"
+
+#include "mavsdk_command_dispatcher.hpp"
 
 using namespace mavsdk;
 
@@ -29,16 +30,14 @@ MavsdkPlatformDriver::MavsdkPlatformDriver(const MavsdkConfig& config)
   auto conn_result = mavsdk_->add_any_connection(config_.connection_url);
   if (conn_result != ConnectionResult::Success) {
     throw std::runtime_error(
-        "[MAVSDK] Connection failed: " + std::to_string(static_cast<int>(conn_result)));
+        "Connection failed: " + std::to_string(static_cast<int>(conn_result)));
   }
-  std::cout << "[MAVSDK] Connected to " << config_.connection_url << std::endl;
 
   auto system_opt = mavsdk_->first_autopilot(config_.discover_timeout_s);
   if (!system_opt) {
-    throw std::runtime_error("[MAVSDK] No autopilot found within timeout");
+    throw std::runtime_error("No autopilot found within timeout");
   }
   system_ = system_opt.value();
-  std::cout << "[MAVSDK] Autopilot discovered" << std::endl;
 
   internals_ = std::make_unique<Internals>(system_, config_);
 }
@@ -114,8 +113,6 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context) {
     telemetry.subscribe_velocity_ned(nullptr);
     telemetry.subscribe_armed(nullptr);
   });
-
-  std::cout << "[MAVSDK] Driver started" << std::endl;
 }
 
 void MavsdkPlatformDriver::stop() {
@@ -132,8 +129,6 @@ void MavsdkPlatformDriver::stop() {
   internals_.reset();
   system_.reset();
   mavsdk_.reset();
-
-  std::cout << "[MAVSDK] Driver stopped" << std::endl;
 }
 
 }  // namespace arch_nav_mavsdk

@@ -1,7 +1,6 @@
-#include "dispatchers/mavsdk_command_dispatcher.hpp"
+#include "mavsdk_command_dispatcher.hpp"
 
 #include <chrono>
-#include <iostream>
 
 using namespace mavsdk;
 using arch_nav::constants::CommandResponse;
@@ -17,13 +16,7 @@ MavsdkCommandDispatcher::MavsdkCommandDispatcher(
       param_(std::make_unique<Param>(system)),
       telemetry_(std::make_unique<Telemetry>(system)),
       config_(config) {
-  // Disable mission feasibility requirement for takeoff/landing items
-  // so that missions can be started while already airborne
-  auto result = param_->set_param_int("MIS_TKO_LAND_REQ", 0);
-  if (result != Param::Result::Success) {
-    std::cerr << "[MAVSDK] Warning: could not set MIS_TKO_LAND_REQ=0: "
-              << result << std::endl;
-  }
+  param_->set_param_int("MIS_TKO_LAND_REQ", 0);
 }
 
 MavsdkCommandDispatcher::~MavsdkCommandDispatcher() {
@@ -43,40 +36,27 @@ void MavsdkCommandDispatcher::clear_subscriptions() {
 
 CommandResponse MavsdkCommandDispatcher::execute_arm() {
   auto result = action_->arm();
-  if (result != Action::Result::Success) {
-    std::cerr << "[MAVSDK] Arm failed: " << result << std::endl;
-    return CommandResponse::DENIED;
-  }
+  if (result != Action::Result::Success) return CommandResponse::DENIED;
   return CommandResponse::ACCEPTED;
 }
 
 CommandResponse MavsdkCommandDispatcher::execute_disarm() {
   auto result = action_->disarm();
-  if (result != Action::Result::Success) {
-    std::cerr << "[MAVSDK] Disarm failed: " << result << std::endl;
-    return CommandResponse::DENIED;
-  }
+  if (result != Action::Result::Success) return CommandResponse::DENIED;
   return CommandResponse::ACCEPTED;
 }
 
 CommandResponse MavsdkCommandDispatcher::execute_takeoff(
     double height, ReferenceFrame /*frame*/,
-    std::function<void()> on_complete) {
+    std::function<void()> on_complete,
+    arch_nav::report::TakeoffDriverOperationData& driver_data) {
   stop();
 
   auto set_alt_result = action_->set_takeoff_altitude(static_cast<float>(height));
-  if (set_alt_result != Action::Result::Success) {
-    std::cerr << "[MAVSDK] Set takeoff altitude failed: " << set_alt_result << std::endl;
-    return CommandResponse::DENIED;
-  }
+  if (set_alt_result != Action::Result::Success) return CommandResponse::DENIED;
 
   auto takeoff_result = action_->takeoff();
-  if (takeoff_result != Action::Result::Success) {
-    std::cerr << "[MAVSDK] Takeoff failed: " << takeoff_result << std::endl;
-    return CommandResponse::DENIED;
-  }
-
-  std::cout << "[MAVSDK] Takeoff initiated at " << height << "m" << std::endl;
+  if (takeoff_result != Action::Result::Success) return CommandResponse::DENIED;
 
   {
     std::lock_guard<std::mutex> lock(complete_mutex_);
@@ -84,7 +64,7 @@ CommandResponse MavsdkCommandDispatcher::execute_takeoff(
   }
   stop_requested_ = false;
 
-  monitor_thread_ = std::thread([this] {
+  monitor_thread_ = std::thread([this, &driver_data] {
     auto saw_takeoff = std::make_shared<std::atomic<bool>>(false);
     auto completed = std::make_shared<std::atomic<bool>>(false);
 
@@ -100,9 +80,12 @@ CommandResponse MavsdkCommandDispatcher::execute_takeoff(
         });
 
     while (!stop_requested_) {
+      auto pos = telemetry_->position();
+      driver_data.current_altitude.store(
+          static_cast<double>(pos.relative_altitude_m));
+
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       if (completed->load()) {
-        std::cout << "[MAVSDK] Takeoff complete" << std::endl;
         std::lock_guard<std::mutex> lock(complete_mutex_);
         if (on_complete_) {
           on_complete_();
@@ -122,12 +105,7 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
   stop();
 
   auto result = action_->land();
-  if (result != Action::Result::Success) {
-    std::cerr << "[MAVSDK] Land failed: " << result << std::endl;
-    return CommandResponse::DENIED;
-  }
-
-  std::cout << "[MAVSDK] Landing initiated" << std::endl;
+  if (result != Action::Result::Success) return CommandResponse::DENIED;
 
   {
     std::lock_guard<std::mutex> lock(complete_mutex_);
@@ -145,50 +123,34 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
 CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
     std::vector<arch_nav::vehicle::Waypoint> waypoints,
     ReferenceFrame frame,
-    std::function<void()> on_complete) {
-  if (frame != ReferenceFrame::GLOBAL_WGS84) {
-    std::cerr << "[MAVSDK] Waypoint following only supports GLOBAL_WGS84 frame" << std::endl;
-    return CommandResponse::DENIED;
-  }
+    std::function<void()> on_complete,
+    arch_nav::report::WaypointDriverOperationData& driver_data) {
+  if (frame != ReferenceFrame::GLOBAL_WGS84) return CommandResponse::DENIED;
 
   stop();
 
-  // Build mission plan from Waypoints (using lat/lon/alt union members)
   Mission::MissionPlan plan;
   for (const auto& wp : waypoints) {
     Mission::MissionItem item{};
-    item.latitude_deg       = wp.lat;
-    item.longitude_deg      = wp.lon;
+    item.latitude_deg        = wp.lat;
+    item.longitude_deg       = wp.lon;
     item.relative_altitude_m = static_cast<float>(wp.alt);
-    item.speed_m_s          = config_.default_speed_m_s;
-    item.is_fly_through     = true;
+    item.speed_m_s           = config_.default_speed_m_s;
+    item.is_fly_through      = true;
     plan.mission_items.push_back(item);
   }
 
-  // Make last waypoint a stop point
   if (!plan.mission_items.empty()) {
     plan.mission_items.back().is_fly_through = false;
   }
 
-  // Upload mission
   auto upload_result = mission_->upload_mission(plan);
-  if (upload_result != Mission::Result::Success) {
-    std::cerr << "[MAVSDK] Mission upload failed: " << upload_result << std::endl;
-    return CommandResponse::DENIED;
-  }
-  std::cout << "[MAVSDK] Mission uploaded (" << waypoints.size()
-            << " waypoints)" << std::endl;
+  if (upload_result != Mission::Result::Success) return CommandResponse::DENIED;
 
-  // Small delay to let PX4 process the uploaded mission
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
-  // Start mission
   auto start_result = mission_->start_mission();
-  if (start_result != Mission::Result::Success) {
-    std::cerr << "[MAVSDK] Mission start failed: " << start_result << std::endl;
-    return CommandResponse::DENIED;
-  }
-  std::cout << "[MAVSDK] Mission started" << std::endl;
+  if (start_result != Mission::Result::Success) return CommandResponse::DENIED;
 
   {
     std::lock_guard<std::mutex> lock(complete_mutex_);
@@ -196,19 +158,27 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
   }
   stop_requested_ = false;
 
-  // Monitor mission progress
-  monitor_thread_ = std::thread([this] {
+  monitor_thread_ = std::thread([this, &driver_data] {
+    auto progress_updated = std::make_shared<std::atomic<bool>>(false);
+    auto last_current = std::make_shared<std::atomic<int>>(0);
+    auto last_total = std::make_shared<std::atomic<int>>(0);
+
     mission_progress_handle_ = mission_->subscribe_mission_progress(
-        [this](Mission::MissionProgress progress) {
-          std::cout << "[MAVSDK] Mission progress: " << progress.current
-                    << "/" << progress.total << std::endl;
+        [progress_updated, last_current, last_total](Mission::MissionProgress progress) {
+          last_current->store(progress.current);
+          last_total->store(progress.total);
+          progress_updated->store(true);
         });
 
     while (!stop_requested_) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      if (progress_updated->exchange(false)) {
+        driver_data.current_waypoint.store(last_current->load());
+        driver_data.total_waypoints.store(last_total->load());
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
       auto finished = mission_->is_mission_finished();
       if (finished.first == Mission::Result::Success && finished.second) {
-        std::cout << "[MAVSDK] Mission complete" << std::endl;
         clear_subscriptions();
         std::lock_guard<std::mutex> lock(complete_mutex_);
         if (on_complete_) {
@@ -227,8 +197,6 @@ CommandResponse MavsdkCommandDispatcher::execute_trajectory(
     std::vector<arch_nav::vehicle::TrajectoryPoint> /*trajectory*/,
     ReferenceFrame /*frame*/,
     std::function<void()> on_complete) {
-  std::cerr << "[MAVSDK] execute_trajectory not yet implemented "
-            << "(requires Offboard plugin)" << std::endl;
   if (on_complete) on_complete();
   return CommandResponse::NOT_SUPPORTED;
 }
@@ -248,7 +216,6 @@ void MavsdkCommandDispatcher::stop() {
 void MavsdkCommandDispatcher::wait_for_landed_and_notify() {
   while (!stop_requested_) {
     if (!telemetry_->armed()) {
-      std::cout << "[MAVSDK] Landing complete (disarmed)" << std::endl;
       std::lock_guard<std::mutex> lock(complete_mutex_);
       if (on_complete_) {
         on_complete_();
