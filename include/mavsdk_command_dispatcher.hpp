@@ -1,5 +1,5 @@
-#ifndef ARCH_NAV_MAVSDK__DISPATCHERS__MAVSDK_COMMAND_DISPATCHER_HPP_
-#define ARCH_NAV_MAVSDK__DISPATCHERS__MAVSDK_COMMAND_DISPATCHER_HPP_
+#ifndef ARCH_NAV_MAVSDK__MAVSDK_COMMAND_DISPATCHER_HPP_
+#define ARCH_NAV_MAVSDK__MAVSDK_COMMAND_DISPATCHER_HPP_
 
 #include <atomic>
 #include <functional>
@@ -20,7 +20,7 @@
 
 namespace arch_nav_mavsdk {
 
-class MavsdkCommandDispatcher : public arch_nav::dispatchers::ICommandDispatcher {
+class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
  public:
   explicit MavsdkCommandDispatcher(
       std::shared_ptr<mavsdk::System> system,

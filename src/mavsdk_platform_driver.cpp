@@ -46,13 +46,14 @@ MavsdkPlatformDriver::~MavsdkPlatformDriver() {
   stop();
 }
 
-arch_nav::dispatchers::ICommandDispatcher& MavsdkPlatformDriver::dispatcher() {
+arch_nav::platform::ICommandDispatcher& MavsdkPlatformDriver::dispatcher() {
   return internals_->dispatcher;
 }
 
-void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context) {
+void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
+                                  std::chrono::milliseconds update_period) {
   running_ = true;
-  telemetry_thread_ = std::thread([this, &context] {
+  telemetry_thread_ = std::thread([this, &context, update_period] {
     Telemetry telemetry(system_);
 
     std::mutex buf_mutex;
@@ -92,7 +93,7 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context) {
         });
 
     while (running_) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(update_period);
 
       std::optional<arch_nav::vehicle::GlobalPosition> gp;
       std::optional<arch_nav::vehicle::Kinematics> kin;

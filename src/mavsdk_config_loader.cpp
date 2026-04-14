@@ -12,10 +12,10 @@ MavsdkConfig MavsdkConfigLoader::load_from(const std::string& path) {
     config.connection_url = yaml["connection_url"].as<std::string>();
   if (yaml["discover_timeout_s"])
     config.discover_timeout_s = yaml["discover_timeout_s"].as<double>();
-  if (yaml["default_altitude_m"])
-    config.default_altitude_m = yaml["default_altitude_m"].as<float>();
   if (yaml["default_speed_m_s"])
     config.default_speed_m_s = yaml["default_speed_m_s"].as<float>();
+  if (yaml["mission_upload_delay_ms"])
+    config.mission_upload_delay_ms = yaml["mission_upload_delay_ms"].as<int>();
 
   return config;
 }

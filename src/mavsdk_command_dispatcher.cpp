@@ -47,9 +47,11 @@ CommandResponse MavsdkCommandDispatcher::execute_disarm() {
 }
 
 CommandResponse MavsdkCommandDispatcher::execute_takeoff(
-    double height, ReferenceFrame /*frame*/,
+    double height, ReferenceFrame frame,
     std::function<void()> on_complete,
     arch_nav::report::TakeoffDriverOperationData& driver_data) {
+  if (frame != ReferenceFrame::LOCAL_NED) return CommandResponse::DENIED;
+
   stop();
 
   auto set_alt_result = action_->set_takeoff_altitude(static_cast<float>(height));
@@ -147,7 +149,7 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
   auto upload_result = mission_->upload_mission(plan);
   if (upload_result != Mission::Result::Success) return CommandResponse::DENIED;
 
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(config_.mission_upload_delay_ms));
 
   auto start_result = mission_->start_mission();
   if (start_result != Mission::Result::Success) return CommandResponse::DENIED;
@@ -196,8 +198,7 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
 CommandResponse MavsdkCommandDispatcher::execute_trajectory(
     std::vector<arch_nav::vehicle::TrajectoryPoint> /*trajectory*/,
     ReferenceFrame /*frame*/,
-    std::function<void()> on_complete) {
-  if (on_complete) on_complete();
+    std::function<void()> /*on_complete*/) {
   return CommandResponse::NOT_SUPPORTED;
 }
 

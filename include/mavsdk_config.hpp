@@ -7,10 +7,10 @@
 namespace arch_nav_mavsdk {
 
 struct MavsdkConfig {
-  std::string connection_url = "udp://localhost:14581";
-  double      discover_timeout_s = 15.0;
-  float       default_altitude_m = 10.0f;
-  float       default_speed_m_s  = 5.0f;
+  std::string connection_url    = "udp://localhost:14581";
+  double      discover_timeout_s         = 15.0;
+  float       default_speed_m_s          = 5.0f;
+  int         mission_upload_delay_ms    = 1000;
 };
 
 }  // namespace arch_nav_mavsdk

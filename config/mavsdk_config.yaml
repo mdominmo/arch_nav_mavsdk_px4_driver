@@ -1,4 +1,4 @@
 connection_url: "udpin://0.0.0.0:14541"
 discover_timeout_s: 5.0
-default_altitude_m: 10.0
 default_speed_m_s: 5.0
+mission_upload_delay_ms: 1000

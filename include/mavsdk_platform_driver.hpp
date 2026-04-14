@@ -2,6 +2,7 @@
 #define ARCH_NAV_MAVSDK__MAVSDK_PLATFORM_DRIVER_HPP_
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 
@@ -17,9 +18,10 @@ class MavsdkPlatformDriver : public arch_nav::platform::IPlatformDriver {
   explicit MavsdkPlatformDriver(const MavsdkConfig& config);
   ~MavsdkPlatformDriver() override;
 
-  arch_nav::dispatchers::ICommandDispatcher& dispatcher() override;
+  arch_nav::platform::ICommandDispatcher& dispatcher() override;
 
-  void start(arch_nav::context::VehicleContext& context) override;
+  void start(arch_nav::context::VehicleContext& context,
+             std::chrono::milliseconds update_period) override;
 
   void stop() override;
 
