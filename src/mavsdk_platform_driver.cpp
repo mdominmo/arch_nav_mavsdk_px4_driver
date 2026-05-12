@@ -26,6 +26,28 @@ void silence_mavsdk_logs() {
   mavsdk::log::subscribe(kSilentMavsdkLogCallback);
 }
 
+arch_nav::constants::ControlState control_state_from_flight_mode(
+    mavsdk::Telemetry::FlightMode mode) {
+  using arch_nav::constants::ControlState;
+  using FlightMode = mavsdk::Telemetry::FlightMode;
+
+  switch (mode) {
+    case FlightMode::Ready:
+    case FlightMode::Takeoff:
+    case FlightMode::Hold:
+    case FlightMode::Mission:
+    case FlightMode::ReturnToLaunch:
+    case FlightMode::Land:
+    case FlightMode::FollowMe:
+    case FlightMode::Offboard:
+      return ControlState::KERNEL_CONTROLLED;
+    case FlightMode::Unknown:
+      return ControlState::UNKNOWN;
+    default:
+      return ControlState::EXTERNAL;
+  }
+}
+
 }  // namespace
 
 struct MavsdkPlatformDriver::Internals {
@@ -76,6 +98,8 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
     std::optional<arch_nav::vehicle::GlobalPosition> buf_gp;
     std::optional<arch_nav::vehicle::Kinematics> buf_kin;
     std::optional<arch_nav::vehicle::VehicleStatus> buf_status;
+    std::optional<arch_nav::constants::ArmState> buf_arm_state;
+    std::optional<arch_nav::constants::ControlState> buf_control_state;
 
     const auto position_handle = telemetry.subscribe_position(
         [&buf_mutex, &buf_gp](Telemetry::Position pos) {
@@ -100,16 +124,27 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
         });
 
     const auto armed_handle = telemetry.subscribe_armed(
-        [this, &buf_mutex, &buf_status](bool armed) {
+        [this, &buf_mutex, &buf_status, &buf_arm_state, &buf_control_state](bool armed) {
           // Ensure landing completion is signaled before propagating DISARMED.
           if (!armed && internals_) {
             internals_->dispatcher.notify_landing_complete_if_pending();
           }
           std::lock_guard<std::mutex> lock(buf_mutex);
-          buf_status.emplace(
-              arch_nav::constants::ControlState::KERNEL_CONTROLLED,
-              armed ? arch_nav::constants::ArmState::ARMED
-                    : arch_nav::constants::ArmState::DISARMED);
+          buf_arm_state = armed ? arch_nav::constants::ArmState::ARMED
+                                : arch_nav::constants::ArmState::DISARMED;
+          if (buf_control_state.has_value()) {
+            buf_status.emplace(*buf_control_state, *buf_arm_state);
+          }
+        });
+
+    const auto flight_mode_handle = telemetry.subscribe_flight_mode(
+        [&buf_mutex, &buf_status, &buf_arm_state, &buf_control_state](
+            Telemetry::FlightMode mode) {
+          std::lock_guard<std::mutex> lock(buf_mutex);
+          buf_control_state = control_state_from_flight_mode(mode);
+          if (buf_arm_state.has_value()) {
+            buf_status.emplace(*buf_control_state, *buf_arm_state);
+          }
         });
 
     while (running_) {
@@ -133,6 +168,7 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
     telemetry.unsubscribe_position(position_handle);
     telemetry.unsubscribe_velocity_ned(velocity_ned_handle);
     telemetry.unsubscribe_armed(armed_handle);
+    telemetry.unsubscribe_flight_mode(flight_mode_handle);
   });
 }
 

@@ -1,17 +1,42 @@
 #include "mavsdk_command_dispatcher.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <iostream>
+#include <limits>
 
 using namespace mavsdk;
 using arch_nav::constants::CommandResponse;
 using arch_nav::constants::ReferenceFrame;
 
 namespace arch_nav_mavsdk {
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kYawToleranceRad = 3.0 * kPi / 180.0;
+constexpr double kBodyYawStepRad = 80.0 * kPi / 180.0;  // Force deterministic direction.
+constexpr std::chrono::seconds kYawOperationTimeout{45};
+
+double normalize_angle_0_2pi(double angle_rad) {
+  angle_rad = std::fmod(angle_rad, 2.0 * kPi);
+  if (angle_rad < 0.0) angle_rad += 2.0 * kPi;
+  return angle_rad;
+}
+
+double shortest_angular_error(double target_rad, double current_rad) {
+  return std::atan2(
+      std::sin(target_rad - current_rad),
+      std::cos(target_rad - current_rad));
+}
+
+}  // namespace
 
 MavsdkCommandDispatcher::MavsdkCommandDispatcher(
     std::shared_ptr<System> system,
     const MavsdkConfig& config)
     : action_(std::make_unique<Action>(system)),
+      mavlink_passthrough_(std::make_unique<MavlinkPassthrough>(system)),
       mission_(std::make_unique<Mission>(system)),
       param_(std::make_unique<Param>(system)),
       telemetry_(std::make_unique<Telemetry>(system)),
@@ -132,6 +157,164 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
 
   monitor_thread_ = std::thread([this] {
     wait_for_landed_and_notify();
+  });
+
+  return CommandResponse::ACCEPTED;
+}
+
+CommandResponse MavsdkCommandDispatcher::execute_change_yaw(
+    double new_yaw,
+    ReferenceFrame frame,
+    std::function<void()> on_complete) {
+  stop();
+
+  // Heading can be temporarily unavailable right after mode transitions.
+  // Retry briefly before rejecting the command.
+  double current_heading_rad = std::numeric_limits<double>::quiet_NaN();
+  for (int i = 0; i < 30; ++i) {
+    const auto heading = telemetry_->heading();
+    if (std::isfinite(heading.heading_deg)) {
+      current_heading_rad = heading.heading_deg * kPi / 180.0;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  if (!std::isfinite(current_heading_rad)) {
+    std::cerr << "[arch_nav_mavsdk] change_yaw denied: heading is not finite"
+              << std::endl;
+    return CommandResponse::DENIED;
+  }
+
+  std::vector<double> target_headings_rad;
+
+  switch (frame) {
+    case ReferenceFrame::LOCAL_NED:
+      target_headings_rad.push_back(normalize_angle_0_2pi(new_yaw));
+      break;
+    case ReferenceFrame::LOCAL_ENU:
+      target_headings_rad.push_back(normalize_angle_0_2pi(kPi / 2.0 - new_yaw));
+      break;
+    case ReferenceFrame::BODY_FCS:
+      {
+        double remaining = new_yaw;
+        double accumulated = 0.0;
+        while (std::fabs(remaining) > 1e-6) {
+          const double step = std::copysign(
+              std::min(std::fabs(remaining), kBodyYawStepRad), remaining);
+          accumulated += step;
+          remaining -= step;
+          target_headings_rad.push_back(
+              normalize_angle_0_2pi(current_heading_rad + accumulated));
+        }
+      }
+      break;
+    default:
+      return CommandResponse::DENIED;
+  }
+  if (target_headings_rad.empty()) {
+    target_headings_rad.push_back(current_heading_rad);
+  }
+
+  const auto send_goto_to_heading = [this](double heading_rad) {
+    const auto pos = telemetry_->position();
+    if (!std::isfinite(pos.latitude_deg) ||
+        !std::isfinite(pos.longitude_deg) ||
+        !std::isfinite(pos.absolute_altitude_m)) {
+      std::cerr << "[arch_nav_mavsdk] change_yaw denied: invalid position" << std::endl;
+      return false;
+    }
+    const float target_yaw_deg = static_cast<float>(heading_rad * 180.0 / kPi);
+    const auto goto_result = action_->goto_location(
+        pos.latitude_deg,
+        pos.longitude_deg,
+        pos.absolute_altitude_m,
+        target_yaw_deg);
+    if (goto_result != Action::Result::Success) {
+      std::cerr << "[arch_nav_mavsdk] change_yaw denied: goto_location failed with result="
+                << goto_result << std::endl;
+      return false;
+    }
+    return true;
+  };
+  if (!send_goto_to_heading(target_headings_rad.front())) {
+    return CommandResponse::DENIED;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(complete_mutex_);
+    on_complete_ = std::move(on_complete);
+  }
+  stop_requested_ = false;
+
+  monitor_thread_ = std::thread(
+      [this,
+       target_headings_rad] {
+    // Prevent immediate callback re-entrancy during task start.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::size_t target_index = 0;
+    const auto started_at = std::chrono::steady_clock::now();
+    while (!stop_requested_) {
+      if (std::chrono::steady_clock::now() - started_at > kYawOperationTimeout) {
+        std::cerr << "[arch_nav_mavsdk] change_yaw timeout after "
+                  << kYawOperationTimeout.count() << "s" << std::endl;
+        break;
+      }
+
+      const auto heading = telemetry_->heading();
+      if (std::isfinite(heading.heading_deg)) {
+        const double current_heading_rad =
+            heading.heading_deg * kPi / 180.0;
+
+        const double error = std::fabs(shortest_angular_error(
+            target_headings_rad[target_index], current_heading_rad));
+        if (error <= kYawToleranceRad) {
+          if (target_index + 1 < target_headings_rad.size()) {
+            ++target_index;
+            const auto pos = telemetry_->position();
+            if (std::isfinite(pos.latitude_deg) &&
+                std::isfinite(pos.longitude_deg) &&
+                std::isfinite(pos.absolute_altitude_m)) {
+              const float next_target_yaw_deg = static_cast<float>(
+                  target_headings_rad[target_index] * 180.0 / kPi);
+              const auto goto_result = action_->goto_location(
+                  pos.latitude_deg,
+                  pos.longitude_deg,
+                  pos.absolute_altitude_m,
+                  next_target_yaw_deg);
+              if (goto_result != Action::Result::Success) {
+                std::cerr << "[arch_nav_mavsdk] change_yaw warning: next step goto failed with result="
+                          << goto_result << std::endl;
+                break;
+              }
+            } else {
+              std::cerr << "[arch_nav_mavsdk] change_yaw warning: invalid position on step advance"
+                        << std::endl;
+              break;
+            }
+          } else {
+            // Phase 1: release driver resources
+            clear_subscriptions();
+            resources_released_ = true;
+
+            // Phase 2: notify external consumer
+            if (!stop_requested_) {
+              std::function<void()> cb;
+              {
+                std::lock_guard<std::mutex> lock(complete_mutex_);
+                cb = std::move(on_complete_);
+              }
+              if (cb) cb();
+            }
+            return;
+          }
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    clear_subscriptions();
+    resources_released_ = true;
   });
 
   return CommandResponse::ACCEPTED;
