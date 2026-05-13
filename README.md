@@ -7,7 +7,8 @@
 ## Features
 
 - **Takeoff / Land** via MAVSDK Action plugin
-- **Waypoint following** via MAVSDK Mission plugin
+- **Waypoint following** via MAVSDK Mission plugin (or MissionRaw when ROI is active)
+- **ROI (Region of Interest)** — vehicle nose tracks a fixed geographic point during waypoint missions
 - **Yaw control** (absolute LOCAL_NED/LOCAL_ENU and relative BODY_FCS)
 - **Arm / Disarm** control
 - **Telemetry** feedback (position, kinematics, vehicle status) streamed to the arch-nav kernel
@@ -19,6 +20,10 @@
 - Yaw changes use `goto_location` at the current position and monitor heading with a 3° tolerance.
 - Large body-relative rotations are broken into 80° steps to ensure deterministic direction.
 - A 45-second timeout is applied to yaw operations.
+- **ROI + waypoints**: when a ROI is active the driver switches from the high-level `Mission` plugin to `MissionRaw` and uploads `MAV_CMD_DO_SET_ROI_LOCATION` (cmd 195) as the first mission item, followed by the waypoints. This is the correct mechanism to make PX4 maintain vehicle yaw toward the ROI in Mission mode — standalone `DO_SET_ROI_LOCATION` commands are ignored by PX4 once a mission starts.
+- `execute_set_roi` sends `MAV_CMD_DO_SET_ROI_LOCATION` via `CommandInt` with `MAV_FRAME_GLOBAL_INT` and int32 lat/lon (×1e7).
+- `execute_clear_roi` sends `MAV_CMD_DO_SET_ROI_NONE` (cmd 197) via `CommandLong`.
+- ROI state is written optimistically to `VehicleContext` immediately after the MAVLink command succeeds (no autopilot ACK wait).
 
 ## Supported reference frames
 
@@ -27,6 +32,7 @@
 | Takeoff | `LOCAL_NED` |
 | Change yaw | `LOCAL_NED`, `LOCAL_ENU`, `BODY_FCS` |
 | Waypoint following | `GLOBAL_WGS84` |
+| Set ROI | `GLOBAL_WGS84` |
 
 ## Configuration
 
@@ -50,7 +56,7 @@ mission_upload_delay_ms: 1000
 Set the config path in `arch_nav_config.yaml`:
 
 ```yaml
-driver: "mavsdk"
+driver: "mavsdk_px4"
 driver_config_path: "/path/to/mavsdk_config.yaml"
 ```
 
@@ -73,7 +79,7 @@ If `driver_config_path` is empty, the driver uses its built-in defaults.
 
 This driver is compiled together with the arch-nav kernel. See the [arch-nav build instructions](https://github.com/mdominmo/arch-nav#build-and-install).
 
-The build produces a shared library (`libarch_nav_mavsdk.so`) installed to `<prefix>/lib/arch_nav/drivers/`, which arch-nav loads dynamically at startup.
+The build produces a shared library (`libarch_nav_mavsdk_px4.so`) installed to `<prefix>/lib/arch_nav/drivers/`, which arch-nav loads dynamically at startup.
 
 ## Writing your own driver
 
