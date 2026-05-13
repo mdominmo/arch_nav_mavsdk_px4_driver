@@ -13,9 +13,12 @@
 #include <mavsdk/plugins/action/action.h>
 #include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
 #include <mavsdk/plugins/mission/mission.h>
+#include <mavsdk/plugins/mission_raw/mission_raw.h>
 #include <mavsdk/plugins/param/param.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
+#include "arch_nav/context/vehicle_context.hpp"
+#include "arch_nav/context/vehicle_context.hpp"
 #include "arch_nav/driver/i_command_dispatcher.hpp"
 #include "mavsdk_config.hpp"
 
@@ -49,20 +52,27 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
       std::function<void()> on_complete) override;
   arch_nav::constants::CommandResponse execute_arm() override;
   arch_nav::constants::CommandResponse execute_disarm() override;
+  arch_nav::constants::CommandResponse execute_set_roi(
+      arch_nav::vehicle::GlobalPosition position,
+      arch_nav::constants::ReferenceFrame frame) override;
+  arch_nav::constants::CommandResponse execute_clear_roi() override;
   void stop() override;
   void notify_landing_complete_if_pending();
+  void set_context(arch_nav::context::VehicleContext* ctx);
 
  private:
   void complete_landing_if_pending();
   void wait_for_landed_and_notify();
   void clear_subscriptions();
 
-  std::unique_ptr<mavsdk::Action>    action_;
+  std::unique_ptr<mavsdk::Action>       action_;
   std::unique_ptr<mavsdk::MavlinkPassthrough> mavlink_passthrough_;
-  std::unique_ptr<mavsdk::Mission>   mission_;
-  std::unique_ptr<mavsdk::Param>     param_;
-  std::unique_ptr<mavsdk::Telemetry> telemetry_;
+  std::unique_ptr<mavsdk::Mission>      mission_;
+  std::unique_ptr<mavsdk::MissionRaw>   mission_raw_;
+  std::unique_ptr<mavsdk::Param>        param_;
+  std::unique_ptr<mavsdk::Telemetry>    telemetry_;
   MavsdkConfig config_;
+  arch_nav::context::VehicleContext* context_{nullptr};
 
   std::atomic<bool>      stop_requested_{false};
   std::atomic<bool>      resources_released_{false};
@@ -72,7 +82,8 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
 
   std::optional<mavsdk::Telemetry::FlightModeHandle>      flight_mode_handle_;
   std::optional<mavsdk::Telemetry::LandedStateHandle>     landed_state_handle_;
-  std::optional<mavsdk::Mission::MissionProgressHandle>    mission_progress_handle_;
+  std::optional<mavsdk::Mission::MissionProgressHandle>       mission_progress_handle_;
+  std::optional<mavsdk::MissionRaw::MissionProgressHandle>    mission_raw_progress_handle_;
   std::atomic<bool>      land_in_progress_{false};
   std::atomic<bool>      land_completion_notified_{false};
   std::atomic<bool>      land_on_ground_detected_{false};

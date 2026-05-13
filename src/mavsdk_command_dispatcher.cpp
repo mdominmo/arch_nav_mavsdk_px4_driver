@@ -38,6 +38,7 @@ MavsdkCommandDispatcher::MavsdkCommandDispatcher(
     : action_(std::make_unique<Action>(system)),
       mavlink_passthrough_(std::make_unique<MavlinkPassthrough>(system)),
       mission_(std::make_unique<Mission>(system)),
+      mission_raw_(std::make_unique<MissionRaw>(system)),
       param_(std::make_unique<Param>(system)),
       telemetry_(std::make_unique<Telemetry>(system)),
       config_(config) {
@@ -61,6 +62,14 @@ void MavsdkCommandDispatcher::clear_subscriptions() {
     mission_->unsubscribe_mission_progress(*mission_progress_handle_);
     mission_progress_handle_.reset();
   }
+  if (mission_raw_progress_handle_) {
+    mission_raw_->unsubscribe_mission_progress(*mission_raw_progress_handle_);
+    mission_raw_progress_handle_.reset();
+  }
+}
+
+void MavsdkCommandDispatcher::set_context(arch_nav::context::VehicleContext* ctx) {
+  context_ = ctx;
 }
 
 CommandResponse MavsdkCommandDispatcher::execute_arm() {
@@ -72,6 +81,40 @@ CommandResponse MavsdkCommandDispatcher::execute_arm() {
 CommandResponse MavsdkCommandDispatcher::execute_disarm() {
   auto result = action_->disarm();
   if (result != Action::Result::Success) return CommandResponse::DENIED;
+  return CommandResponse::ACCEPTED;
+}
+
+CommandResponse MavsdkCommandDispatcher::execute_set_roi(
+    arch_nav::vehicle::GlobalPosition position,
+    ReferenceFrame frame) {
+  if (frame != ReferenceFrame::GLOBAL_WGS84) return CommandResponse::NOT_SUPPORTED;
+
+  MavlinkPassthrough::CommandInt cmd{};
+  cmd.target_sysid  = mavlink_passthrough_->get_target_sysid();
+  cmd.target_compid = mavlink_passthrough_->get_target_compid();
+  cmd.command       = MAV_CMD_DO_SET_ROI_LOCATION;
+  cmd.frame         = MAV_FRAME_GLOBAL_INT;
+  cmd.x             = static_cast<int32_t>(position.lat * 1e7);
+  cmd.y             = static_cast<int32_t>(position.lon * 1e7);
+  cmd.z             = static_cast<float>(position.alt);
+
+  auto result = mavlink_passthrough_->send_command_int(cmd);
+  if (result != MavlinkPassthrough::Result::Success) return CommandResponse::DENIED;
+
+  if (context_) context_->update_roi(position);
+  return CommandResponse::ACCEPTED;
+}
+
+CommandResponse MavsdkCommandDispatcher::execute_clear_roi() {
+  MavlinkPassthrough::CommandLong cmd{};
+  cmd.target_sysid  = mavlink_passthrough_->get_target_sysid();
+  cmd.target_compid = mavlink_passthrough_->get_target_compid();
+  cmd.command       = MAV_CMD_DO_SET_ROI_NONE;
+
+  auto result = mavlink_passthrough_->send_command_long(cmd);
+  if (result != MavlinkPassthrough::Result::Success) return CommandResponse::DENIED;
+
+  if (context_) context_->clear_roi();
   return CommandResponse::ACCEPTED;
 }
 
@@ -360,6 +403,98 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
 
   stop();
 
+  const auto roi = context_ ? context_->get_roi() : std::nullopt;
+
+  if (roi) {
+    // Build a raw MAVLink mission: DO_SET_ROI_LOCATION as item 0, then waypoints.
+    // This is the only way PX4 respects ROI during Mission mode.
+    std::vector<MissionRaw::MissionItem> items;
+
+    MissionRaw::MissionItem roi_item{};
+    roi_item.seq         = 0;
+    roi_item.frame       = MAV_FRAME_GLOBAL_INT;      // 5 — WGS84, absolute alt
+    roi_item.command     = MAV_CMD_DO_SET_ROI_LOCATION; // 195
+    roi_item.current     = 1;
+    roi_item.autocontinue = 1;
+    roi_item.x           = static_cast<int32_t>(roi->lat * 1e7);
+    roi_item.y           = static_cast<int32_t>(roi->lon * 1e7);
+    roi_item.z           = static_cast<float>(roi->alt);
+    roi_item.mission_type = 0;  // MAV_MISSION_TYPE_MISSION
+    items.push_back(roi_item);
+
+    for (std::size_t i = 0; i < waypoints.size(); ++i) {
+      MissionRaw::MissionItem wp_item{};
+      wp_item.seq          = static_cast<uint32_t>(i + 1);
+      wp_item.frame        = MAV_FRAME_GLOBAL_RELATIVE_ALT_INT; // 6 — relative alt
+      wp_item.command      = MAV_CMD_NAV_WAYPOINT;  // 16
+      wp_item.current      = 0;
+      wp_item.autocontinue = 1;
+      wp_item.param4       = std::numeric_limits<float>::quiet_NaN();  // yaw: don't change
+      wp_item.x            = static_cast<int32_t>(waypoints[i].lat * 1e7);
+      wp_item.y            = static_cast<int32_t>(waypoints[i].lon * 1e7);
+      wp_item.z            = static_cast<float>(waypoints[i].alt);
+      wp_item.mission_type = 0;
+      items.push_back(wp_item);
+    }
+
+    auto upload_result = mission_raw_->upload_mission(items);
+    if (upload_result != MissionRaw::Result::Success) return CommandResponse::DENIED;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(config_.mission_upload_delay_ms));
+
+    auto start_result = mission_raw_->start_mission();
+    if (start_result != MissionRaw::Result::Success) return CommandResponse::DENIED;
+
+    {
+      std::lock_guard<std::mutex> lock(complete_mutex_);
+      on_complete_ = std::move(on_complete);
+    }
+    stop_requested_ = false;
+
+    monitor_thread_ = std::thread([this, &driver_data] {
+      auto progress_updated = std::make_shared<std::atomic<bool>>(false);
+      auto last_current = std::make_shared<std::atomic<int>>(0);
+      auto last_total = std::make_shared<std::atomic<int>>(0);
+
+      // Subscribe to raw mission progress; offset by 1 to hide the ROI item from the user.
+      mission_raw_progress_handle_ = mission_raw_->subscribe_mission_progress(
+          [progress_updated, last_current, last_total](MissionRaw::MissionProgress progress) {
+            last_current->store(progress.current);
+            last_total->store(progress.total);
+            progress_updated->store(true);
+          });
+
+      while (!stop_requested_) {
+        if (progress_updated->exchange(false)) {
+          const int raw_current = last_current->load();
+          const int raw_total   = last_total->load();
+          driver_data.current_waypoint.store(std::max(0, raw_current - 1));
+          driver_data.total_waypoints.store(std::max(0, raw_total - 1));
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        auto finished = mission_raw_->is_mission_finished();
+        if (finished.first == MissionRaw::Result::Success && finished.second) {
+          clear_subscriptions();
+          resources_released_ = true;
+
+          if (!stop_requested_) {
+            std::function<void()> cb;
+            {
+              std::lock_guard<std::mutex> lock(complete_mutex_);
+              cb = std::move(on_complete_);
+            }
+            if (cb) cb();
+          }
+          break;
+        }
+      }
+    });
+
+    return CommandResponse::ACCEPTED;
+  }
+
+  // No ROI: use the high-level Mission plugin.
   Mission::MissionPlan plan;
   for (const auto& wp : waypoints) {
     Mission::MissionItem item{};
@@ -410,11 +545,9 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       auto finished = mission_->is_mission_finished();
       if (finished.first == Mission::Result::Success && finished.second) {
-        // Phase 1: release driver resources
         clear_subscriptions();
         resources_released_ = true;
 
-        // Phase 2: notify external consumer
         if (!stop_requested_) {
           std::function<void()> cb;
           {
