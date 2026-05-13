@@ -11,6 +11,7 @@
 
 #include <mavsdk/mavsdk.h>
 #include <mavsdk/plugins/action/action.h>
+#include <mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h>
 #include <mavsdk/plugins/mission/mission.h>
 #include <mavsdk/plugins/param/param.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
@@ -34,6 +35,9 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
       arch_nav::report::TakeoffDriverOperationData& driver_data) override;
   arch_nav::constants::CommandResponse execute_land(
       std::function<void()> on_complete) override;
+  arch_nav::constants::CommandResponse execute_change_yaw(
+      double new_yaw, arch_nav::constants::ReferenceFrame frame,
+      std::function<void()> on_complete) override;
   arch_nav::constants::CommandResponse execute_waypoint_following(
       std::vector<arch_nav::vehicle::Waypoint> waypoints,
       arch_nav::constants::ReferenceFrame frame,
@@ -54,6 +58,7 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   void clear_subscriptions();
 
   std::unique_ptr<mavsdk::Action>    action_;
+  std::unique_ptr<mavsdk::MavlinkPassthrough> mavlink_passthrough_;
   std::unique_ptr<mavsdk::Mission>   mission_;
   std::unique_ptr<mavsdk::Param>     param_;
   std::unique_ptr<mavsdk::Telemetry> telemetry_;
