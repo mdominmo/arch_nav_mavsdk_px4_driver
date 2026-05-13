@@ -90,6 +90,7 @@ arch_nav::platform::ICommandDispatcher& MavsdkPlatformDriver::dispatcher() {
 void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
                                   std::chrono::milliseconds update_period) {
   silence_mavsdk_logs();
+  internals_->dispatcher.set_context(&context);
   running_ = true;
   telemetry_thread_ = std::thread([this, &context, update_period] {
     Telemetry telemetry(system_);
@@ -176,6 +177,7 @@ void MavsdkPlatformDriver::stop() {
   running_ = false;
 
   if (internals_) {
+    internals_->dispatcher.set_context(nullptr);
     internals_->dispatcher.stop();
   }
 
