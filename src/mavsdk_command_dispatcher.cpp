@@ -502,12 +502,8 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
     item.longitude_deg       = wp.lon;
     item.relative_altitude_m = static_cast<float>(wp.alt);
     item.speed_m_s           = config_.default_speed_m_s;
-    item.is_fly_through      = true;
+    item.is_fly_through      = false;
     plan.mission_items.push_back(item);
-  }
-
-  if (!plan.mission_items.empty()) {
-    plan.mission_items.back().is_fly_through = false;
   }
 
   auto upload_result = mission_->upload_mission(plan);
