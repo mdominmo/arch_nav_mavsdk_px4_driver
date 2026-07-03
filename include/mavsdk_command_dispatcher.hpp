@@ -17,8 +17,6 @@
 #include <mavsdk/plugins/param/param.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
-#include "arch_nav/context/vehicle_context.hpp"
-#include "arch_nav/context/vehicle_context.hpp"
 #include "arch_nav/driver/i_command_dispatcher.hpp"
 #include "mavsdk_config.hpp"
 
@@ -35,7 +33,7 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   arch_nav::constants::CommandResponse execute_takeoff(
       double height, arch_nav::constants::ReferenceFrame frame,
       std::function<void()> on_complete,
-      arch_nav::report::TakeoffDriverOperationData& driver_data) override;
+      arch_nav::execution::TakeoffExecutionState& state) override;
   arch_nav::constants::CommandResponse execute_land(
       std::function<void()> on_complete) override;
   arch_nav::constants::CommandResponse execute_change_yaw(
@@ -45,11 +43,12 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
       std::vector<arch_nav::vehicle::Waypoint> waypoints,
       arch_nav::constants::ReferenceFrame frame,
       std::function<void()> on_complete,
-      arch_nav::report::WaypointDriverOperationData& driver_data) override;
+      arch_nav::execution::WaypointExecutionState& state) override;
   arch_nav::constants::CommandResponse execute_trajectory(
       std::vector<arch_nav::vehicle::TrajectoryPoint> trajectory,
       arch_nav::constants::ReferenceFrame frame,
-      std::function<void()> on_complete) override;
+      std::function<void()> on_complete,
+      arch_nav::execution::TrajectoryExecutionState& state) override;
   arch_nav::constants::CommandResponse execute_arm() override;
   arch_nav::constants::CommandResponse execute_disarm() override;
   arch_nav::constants::CommandResponse execute_set_roi(
@@ -58,7 +57,6 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   arch_nav::constants::CommandResponse execute_clear_roi() override;
   void stop() override;
   void notify_landing_complete_if_pending();
-  void set_context(arch_nav::context::VehicleContext* ctx);
 
  private:
   void complete_landing_if_pending();
@@ -72,7 +70,6 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   std::unique_ptr<mavsdk::Param>        param_;
   std::unique_ptr<mavsdk::Telemetry>    telemetry_;
   MavsdkConfig config_;
-  arch_nav::context::VehicleContext* context_{nullptr};
 
   std::atomic<bool>      stop_requested_{false};
   std::atomic<bool>      resources_released_{false};
@@ -87,6 +84,8 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   std::atomic<bool>      land_in_progress_{false};
   std::atomic<bool>      land_completion_notified_{false};
   std::atomic<bool>      land_on_ground_detected_{false};
+
+  std::optional<arch_nav::vehicle::GlobalPosition> pending_roi_;
 };
 
 }  // namespace arch_nav_mavsdk
