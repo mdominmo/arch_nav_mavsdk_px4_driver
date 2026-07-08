@@ -1,6 +1,7 @@
 #include "mavsdk_platform_driver.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -120,7 +121,7 @@ void MavsdkPlatformDriver::start(arch_nav::context::IVehicleContextWriter& vehic
               0.0, 0.0, 0.0,
               pos.latitude_deg, pos.longitude_deg,
               static_cast<double>(pos.absolute_altitude_m),
-              heading.heading_deg);
+              heading.heading_deg * M_PI / 180.0);
         });
 
     const auto armed_handle = telemetry.subscribe_armed(
