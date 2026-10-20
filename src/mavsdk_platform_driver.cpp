@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -76,6 +77,11 @@ MavsdkPlatformDriver::MavsdkPlatformDriver(const MavsdkConfig& config)
     throw std::runtime_error("No autopilot found within timeout");
   }
   system_ = system_opt.value();
+
+  std::cerr << "[arch_nav_mavsdk] connected on " << config_.connection_url
+            << " - default_speed_m_s=" << config_.default_speed_m_s
+            << " mission_upload_delay_ms=" << config_.mission_upload_delay_ms
+            << std::endl;
 
   internals_ = std::make_unique<Internals>(system_, config_);
 }
@@ -177,12 +183,16 @@ void MavsdkPlatformDriver::stop() {
   running_ = false;
 
   if (internals_) {
+    std::cerr << "[arch_nav_mavsdk] stop(): stopping dispatcher..." << std::endl;
     internals_->dispatcher.stop();
+    std::cerr << "[arch_nav_mavsdk] stop(): dispatcher stopped" << std::endl;
   }
 
+  std::cerr << "[arch_nav_mavsdk] stop(): joining telemetry_thread_..." << std::endl;
   if (telemetry_thread_.joinable()) {
     telemetry_thread_.join();
   }
+  std::cerr << "[arch_nav_mavsdk] stop(): telemetry_thread_ joined" << std::endl;
 
   internals_.reset();
   system_.reset();

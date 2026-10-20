@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <limits>
 
@@ -30,6 +31,19 @@ double shortest_angular_error(double target_rad, double current_rad) {
       std::cos(target_rad - current_rad));
 }
 
+constexpr std::chrono::seconds kMavsdkCallTimeout{10};
+
+template <typename Result, typename AsyncCall>
+Result call_with_timeout(AsyncCall&& async_call) {
+  auto promise = std::make_shared<std::promise<Result>>();
+  auto future = promise->get_future();
+  async_call([promise](Result r) { promise->set_value(r); });
+  if (future.wait_for(kMavsdkCallTimeout) != std::future_status::ready) {
+    return Result::Timeout;
+  }
+  return future.get();
+}
+
 }  // namespace
 
 MavsdkCommandDispatcher::MavsdkCommandDispatcher(
@@ -43,6 +57,10 @@ MavsdkCommandDispatcher::MavsdkCommandDispatcher(
       telemetry_(std::make_unique<Telemetry>(system)),
       config_(config) {
   param_->set_param_int("MIS_TKO_LAND_REQ", 0);
+  auto cruise_result = param_->set_param_float(
+      "MPC_XY_CRUISE", static_cast<float>(config_.default_speed_m_s));
+  std::cerr << "[arch_nav_mavsdk] MPC_XY_CRUISE set to " << config_.default_speed_m_s
+            << " m/s, result=" << cruise_result << std::endl;
 }
 
 MavsdkCommandDispatcher::~MavsdkCommandDispatcher() {
@@ -395,9 +413,13 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
     ReferenceFrame frame,
     std::function<void()> on_complete,
     arch_nav::execution::WaypointExecutionState& state) {
+  std::cerr << "[arch_nav_mavsdk] execute_waypoint_following: entered, "
+            << waypoints.size() << " waypoint(s), frame=" << static_cast<int>(frame) << std::endl;
   if (frame != ReferenceFrame::GLOBAL_WGS84) return CommandResponse::DENIED;
 
+  std::cerr << "[arch_nav_mavsdk] execute_waypoint_following: calling stop()..." << std::endl;
   stop();
+  std::cerr << "[arch_nav_mavsdk] execute_waypoint_following: stop() done" << std::endl;
 
   const auto roi = pending_roi_;
 
@@ -433,12 +455,14 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
       items.push_back(wp_item);
     }
 
-    auto upload_result = mission_raw_->upload_mission(items);
+    auto upload_result = call_with_timeout<MissionRaw::Result>(
+        [this, &items](auto cb) { mission_raw_->upload_mission_async(items, cb); });
     if (upload_result != MissionRaw::Result::Success) return CommandResponse::DENIED;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(config_.mission_upload_delay_ms));
 
-    auto start_result = mission_raw_->start_mission();
+    auto start_result = call_with_timeout<MissionRaw::Result>(
+        [this](auto cb) { mission_raw_->start_mission_async(cb); });
     if (start_result != MissionRaw::Result::Success) return CommandResponse::DENIED;
 
     {
@@ -501,13 +525,21 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
     item.is_fly_through      = false;
     plan.mission_items.push_back(item);
   }
+  std::cerr << "[arch_nav_mavsdk] uploading " << plan.mission_items.size()
+            << " mission item(s) at speed_m_s=" << config_.default_speed_m_s << std::endl;
 
-  auto upload_result = mission_->upload_mission(plan);
+  auto upload_result = call_with_timeout<Mission::Result>(
+      [this, &plan](auto cb) { mission_->upload_mission_async(plan, cb); });
+  std::cerr << "[arch_nav_mavsdk] upload_mission result=" << upload_result << std::endl;
   if (upload_result != Mission::Result::Success) return CommandResponse::DENIED;
 
+  std::cerr << "[arch_nav_mavsdk] sleeping " << config_.mission_upload_delay_ms << "ms before start_mission" << std::endl;
   std::this_thread::sleep_for(std::chrono::milliseconds(config_.mission_upload_delay_ms));
 
-  auto start_result = mission_->start_mission();
+  std::cerr << "[arch_nav_mavsdk] calling start_mission..." << std::endl;
+  auto start_result = call_with_timeout<Mission::Result>(
+      [this](auto cb) { mission_->start_mission_async(cb); });
+  std::cerr << "[arch_nav_mavsdk] start_mission result=" << start_result << std::endl;
   if (start_result != Mission::Result::Success) return CommandResponse::DENIED;
 
   {
@@ -553,6 +585,7 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
     }
   });
 
+  std::cerr << "[arch_nav_mavsdk] execute_waypoint_following: returning ACCEPTED" << std::endl;
   return CommandResponse::ACCEPTED;
 }
 
@@ -566,6 +599,7 @@ CommandResponse MavsdkCommandDispatcher::execute_trajectory(
 
 void MavsdkCommandDispatcher::stop() {
   const bool was_running = monitor_thread_.joinable();
+  std::cerr << "[arch_nav_mavsdk] dispatcher stop(): was_running=" << was_running << std::endl;
 
   stop_requested_ = true;
   clear_subscriptions();
@@ -575,11 +609,15 @@ void MavsdkCommandDispatcher::stop() {
         monitor_thread_.get_id() == std::this_thread::get_id();
     if (is_monitor_thread || resources_released_.load())
       monitor_thread_.detach();
-    else
+    else {
+      std::cerr << "[arch_nav_mavsdk] dispatcher stop(): joining monitor_thread_..." << std::endl;
       monitor_thread_.join();
+      std::cerr << "[arch_nav_mavsdk] dispatcher stop(): monitor_thread_ joined" << std::endl;
+    }
   }
 
   if (was_running) {
+    std::cerr << "[arch_nav_mavsdk] dispatcher stop(): calling hold()..." << std::endl;
     // A previous operation (takeoff/land/change_yaw/waypoint_following) was
     // genuinely in flight. None of those are self-cancelling on the flight
     // controller: a mission uploaded via Mission/MissionRaw keeps running
@@ -589,7 +627,9 @@ void MavsdkCommandDispatcher::stop() {
     // covers every operation type uniformly - it stops an in-progress
     // mission/goto and holds position - and any command issued right after
     // (arm/takeoff/land/goto_location/mission start) overrides it anyway.
-    action_->hold();
+    call_with_timeout<Action::Result>(
+        [this](auto cb) { action_->hold_async(cb); });
+    std::cerr << "[arch_nav_mavsdk] dispatcher stop(): hold() done" << std::endl;
   }
 
   resources_released_ = false;
